@@ -1,56 +1,43 @@
 // server.js
 const WebSocket = require('ws');
-const express = require('express');
-const http = require('http');
+const port = process.env.PORT || 3000;
 
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ port });
 
-const rooms = {}; // roomId => { users: Set(ws), state: { videoId, time, playing } }
+const rooms = {}; // roomId -> Set of clients
 
-wss.on('connection', (ws) => {
-  ws.on('message', (msg) => {
-    try {
-      const data = JSON.parse(msg);
+wss.on('connection', ws => {
+  ws.on('message', msg => {
+    let data;
+    try { data = JSON.parse(msg); } catch(e) { return; }
 
-      switch (data.type) {
-        case 'join':
-          const { roomId } = data;
-          ws.roomId = roomId;
-          if (!rooms[roomId]) rooms[roomId] = { users: new Set(), state: null };
-          rooms[roomId].users.add(ws);
+    const { type, roomId, payload } = data;
 
-          // Send current room state to new user
-          if (rooms[roomId].state) {
-            ws.send(JSON.stringify({ type: 'sync', state: rooms[roomId].state }));
-          }
-          break;
+    if (type === 'join') {
+      ws.roomId = roomId;
+      if (!rooms[roomId]) rooms[roomId] = new Set();
+      rooms[roomId].add(ws);
+      console.log(`User joined room: ${roomId}`);
+    }
 
-        case 'state':
-          // Broadcast state to all users in the room
-          const room = rooms[ws.roomId];
-          if (!room) return;
-          room.state = data.state; // { videoId, time, playing }
-          room.users.forEach(u => {
-            if (u !== ws && u.readyState === WebSocket.OPEN) {
-              u.send(JSON.stringify({ type: 'sync', state: data.state }));
-            }
-          });
-          break;
-      }
-    } catch (e) {
-      console.error(e);
+    if (type === 'signal') {
+      // Relay signaling data to all other clients in the room
+      const clients = rooms[ws.roomId];
+      if (!clients) return;
+      clients.forEach(client => {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ type: 'signal', payload }));
+        }
+      });
     }
   });
 
   ws.on('close', () => {
     if (ws.roomId && rooms[ws.roomId]) {
-      rooms[ws.roomId].users.delete(ws);
-      if (rooms[ws.roomId].users.size === 0) delete rooms[ws.roomId];
+      rooms[ws.roomId].delete(ws);
+      if (rooms[ws.roomId].size === 0) delete rooms[ws.roomId];
     }
   });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+console.log(`WebRTC signaling server running on port ${port}`);
