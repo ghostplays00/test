@@ -2,77 +2,73 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Multi-user YouTube Sync</title>
-  <script src="https://www.youtube.com/iframe_api"></script>
+  <title>Discord-style Voice Chat</title>
   <style>
-    body { font-family: Arial; background: #1e1e1e; color: #fff; text-align:center; padding: 30px; }
-    #player { margin: 20px auto; }
+    body { font-family: Arial; background: #222; color: #fff; text-align:center; padding:20px; }
     input, button { padding:5px; margin:5px; }
+    audio { display:block; margin:10px auto; }
   </style>
 </head>
 <body>
-  <h1>Multi-user YouTube Sync</h1>
+  <h1>Multi-user Voice Chat (Discord style)</h1>
   <input id="room" placeholder="Room ID">
-  <input id="video" placeholder="YouTube Video ID">
   <button id="join">Join Room</button>
-  <button id="play">Play</button>
-  <button id="pause">Pause</button>
-  <div id="player"></div>
+  <div id="audios"></div>
 
   <script>
-    let player, ws, roomId;
+    let ws, pc;
+    const audiosDiv = document.getElementById('audios');
 
-    // Load YouTube IFrame API
-    function onYouTubeIframeAPIReady() {
-      player = new YT.Player('player', {
-        height: '360',
-        width: '640',
-        videoId: '',
-        events: {
-          'onStateChange': onPlayerStateChange
-        }
-      });
-    }
+    document.getElementById('join').onclick = async () => {
+      const roomId = document.getElementById('room').value.trim();
+      if (!roomId) return alert('Enter Room ID');
 
-    function connectWS() {
       ws = new WebSocket(`wss://${window.location.hostname}`);
-      ws.onopen = () => console.log('Connected to server');
-      ws.onmessage = (msg) => {
-        const data = JSON.parse(msg.data);
-        if (data.type === 'sync') {
-          const s = data.state;
-          if (player.getVideoData().video_id !== s.videoId) {
-            player.loadVideoById(s.videoId, s.time);
-          } else {
-            player.seekTo(s.time, true);
-          }
-          if (s.playing) player.playVideo();
-          else player.pauseVideo();
+      ws.onopen = () => ws.send(JSON.stringify({ type:'join', roomId }));
+
+      // Capture microphone
+      const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+      pc.ontrack = e => {
+        const audio = document.createElement('audio');
+        audio.autoplay = true;
+        audio.srcObject = e.streams[0];
+        audiosDiv.appendChild(audio);
+      };
+
+      pc.onicecandidate = e => {
+        if (e.candidate && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type:'signal', payload:{ candidate:e.candidate } }));
         }
       };
-    }
 
-    function onPlayerStateChange(event) {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const state = {
-        videoId: player.getVideoData().video_id,
-        time: player.getCurrentTime(),
-        playing: player.getPlayerState() === YT.PlayerState.PLAYING
+      ws.onmessage = async e => {
+        const msg = JSON.parse(e.data);
+        if (msg.type !== 'signal') return;
+        const { sdp, candidate } = msg.payload;
+
+        if (sdp) {
+          await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+          if (sdp.type === 'offer') {
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({ type:'signal', payload:{ sdp:pc.localDescription } }));
+          }
+        }
+        if (candidate) await pc.addIceCandidate(candidate);
       };
-      ws.send(JSON.stringify({ type: 'state', state }));
-    }
 
-    document.getElementById('join').onclick = () => {
-      roomId = document.getElementById('room').value.trim();
-      const vid = document.getElementById('video').value.trim();
-      if (!roomId || !vid) return alert('Enter Room ID and Video ID');
-      player.loadVideoById(vid, 0);
-      connectWS();
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'join', roomId }));
+      // Create offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.onopen = () => ws.send(JSON.stringify({ type:'signal', payload:{ sdp:pc.localDescription } }));
     };
-
-    document.getElementById('play').onclick = () => player.playVideo();
-    document.getElementById('pause').onclick = () => player.pauseVideo();
   </script>
 </body>
 </html>
